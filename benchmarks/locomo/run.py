@@ -582,6 +582,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--categories", default="1,2,3,4", help="Comma-separated categories")
     parser.add_argument("--with-evidence", action="store_true", help="Pass evidence to judge")
     parser.add_argument("--user-profile", action="store_true", help="Fetch user profiles")
+    parser.add_argument("--max-questions", type=int, default=None, help="Max questions to process (for quick testing)")
     parser.add_argument("--rpm", type=int, default=200, help="Requests per minute for LLM")
     parser.add_argument("--backend", default="oss", choices=["oss", "cloud"],
                         help="Mem0 backend: 'oss' for self-hosted server (default), 'cloud' for api.mem0.ai")
@@ -712,6 +713,8 @@ async def async_main() -> None:
                     (qi, qa) for qi, qa in enumerate(questions)
                     if qa.get("category") in categories
                 ]
+                if args.max_questions is not None:
+                    conv_questions = conv_questions[:args.max_questions]
 
                 search_pbar = tqdm(conv_questions, desc=f"Questions conv {conv_idx}", leave=True)
                 for qi, qa in search_pbar:

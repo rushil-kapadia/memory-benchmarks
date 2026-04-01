@@ -137,12 +137,8 @@ class Mem0Client:
         session = await self._get_session()
 
         payload: dict[str, Any] = {"messages": messages, "user_id": user_id}
-        if timestamp is not None and observation_date is None:
-            observation_date = datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d")
-        if observation_date:
-            payload["observation_date"] = observation_date
-        if custom_instructions:
-            payload["custom_instructions"] = custom_instructions
+        # observation_date and custom_instructions are not yet supported
+        # by the OSS mem0 SDK — skip them to avoid server errors
         if metadata:
             payload["metadata"] = metadata
 

@@ -67,14 +67,17 @@ def _load_config() -> dict:
 
         # Inject Qdrant connection if vector_store not specified
         if "vector_store" not in cfg:
-            cfg["vector_store"] = {
-                "provider": "qdrant",
-                "config": {
-                    "host": os.getenv("QDRANT_HOST", "qdrant"),
-                    "port": int(os.getenv("QDRANT_PORT", "6333")),
-                    "collection_name": os.getenv("COLLECTION_NAME", "memories"),
-                },
+            vs_config: dict[str, Any] = {
+                "host": os.getenv("QDRANT_HOST", "qdrant"),
+                "port": int(os.getenv("QDRANT_PORT", "6333")),
+                "collection_name": os.getenv("COLLECTION_NAME", "memories"),
             }
+            # Propagate embedding_dims so Qdrant creates the collection
+            # with the correct vector size
+            embed_dims = cfg.get("embedder", {}).get("config", {}).get("embedding_dims")
+            if embed_dims:
+                vs_config["embedding_model_dims"] = embed_dims
+            cfg["vector_store"] = {"provider": "qdrant", "config": vs_config}
 
         logger.info(
             "Config: llm=%s/%s, embedder=%s/%s, vector_store=%s",
@@ -118,6 +121,15 @@ def _load_config() -> dict:
 config = _load_config()
 
 # ---------------------------------------------------------------------------
+# Register custom embedding providers
+# ---------------------------------------------------------------------------
+
+from mem0.utils.factory import EmbedderFactory
+
+# Register SageMaker embedder (allowlist patched in Dockerfile via sed)
+EmbedderFactory.provider_to_class["sagemaker"] = "sagemaker_embedder.SageMakerEmbedding"
+
+# ---------------------------------------------------------------------------
 # App lifespan — initialise Memory once at startup
 # ---------------------------------------------------------------------------
 
@@ -129,9 +141,14 @@ async def lifespan(app: FastAPI):
     global memory_instance
     from mem0 import Memory
 
-    logger.info("Initialising Mem0 with Qdrant at %s:%s", QDRANT_HOST, QDRANT_PORT)
+    logger.info("Initialising Mem0...")
     memory_instance = Memory.from_config(config)
-    logger.info("Mem0 ready (collection=%s, llm=%s, embedder=%s)", COLLECTION_NAME, LLM_MODEL, EMBEDDER_MODEL)
+    logger.info(
+        "Mem0 ready (llm=%s, embedder=%s, vector_store=%s)",
+        config.get("llm", {}).get("provider", "?"),
+        config.get("embedder", {}).get("provider", "?"),
+        config.get("vector_store", {}).get("provider", "?"),
+    )
     yield
     logger.info("Shutting down")
 
@@ -196,10 +213,10 @@ def add_memories(req: AddRequest):
         params["run_id"] = req.run_id
     if req.metadata:
         params["metadata"] = req.metadata
-    if req.observation_date:
-        params["observation_date"] = req.observation_date
+    # observation_date and custom_instructions: pass through only if
+    # the installed mem0ai version supports them
     if req.custom_instructions:
-        params["custom_instructions"] = req.custom_instructions
+        params["prompt"] = req.custom_instructions
 
     try:
         result = mem.add(req.messages, **params)
@@ -340,7 +357,11 @@ def reset_all():
 @app.get("/health")
 def health():
     """Health check."""
-    return {"status": "ok", "collection": COLLECTION_NAME, "llm": LLM_MODEL}
+    return {
+        "status": "ok",
+        "llm": config.get("llm", {}).get("provider", "?"),
+        "embedder": config.get("embedder", {}).get("provider", "?"),
+    }
 
 
 @app.get("/")

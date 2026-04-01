@@ -12,6 +12,11 @@ services:
       - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY:-}
       - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-us-west-2}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}
+      - SAGEMAKER_ENDPOINT_NAME=${SAGEMAKER_ENDPOINT_NAME:-}
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - COLLECTION_NAME=${COLLECTION_NAME:-memories}
@@ -19,8 +24,9 @@ services:
       - EMBEDDER_MODEL=${EMBEDDER_MODEL:-text-embedding-3-small}
     volumes:
       - mem0_history:/app/history
-      # Custom config for advanced setups (Azure, Ollama, etc.)
-      - ./mem0-config.yaml:/app/config.yaml:ro
+      # Custom config for advanced setups (Azure, Ollama, SageMaker, etc.)
+      # Uncomment and point to your config file:
+      # - ./mem0-config.yaml:/app/config.yaml:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
