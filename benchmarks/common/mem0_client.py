@@ -80,7 +80,7 @@ class Mem0Client:
         self.event_poll_interval = event_poll_interval
         self.event_poll_timeout = event_poll_timeout
         self.timeout = aiohttp.ClientTimeout(total=timeout)
-        self.limiter = AsyncLimiter(rpm, 60)
+        self.limiter = AsyncLimiter(100000, 60)  # no client-side rate limiting
         self._session: aiohttp.ClientSession | None = None
 
     @property
@@ -92,9 +92,11 @@ class Mem0Client:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(limit=0)  # unlimited concurrent connections
             self._session = aiohttp.ClientSession(
                 headers=self._headers,
                 timeout=self.timeout,
+                connector=connector,
             )
         return self._session
 
@@ -137,8 +139,17 @@ class Mem0Client:
         session = await self._get_session()
 
         payload: dict[str, Any] = {"messages": messages, "user_id": user_id}
-        # observation_date and custom_instructions are not yet supported
-        # by the OSS mem0 SDK — skip them to avoid server errors
+        if timestamp is not None:
+            payload["timestamp"] = timestamp
+        elif observation_date is not None:
+            # Convert ISO date to unix epoch
+            try:
+                d = datetime.strptime(observation_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                payload["timestamp"] = int(d.timestamp())
+            except ValueError:
+                pass
+        if custom_instructions:
+            payload["custom_instructions"] = custom_instructions
         if metadata:
             payload["metadata"] = metadata
 
@@ -175,10 +186,17 @@ class Mem0Client:
         session = await self._get_session()
 
         payload: dict[str, Any] = {"messages": messages, "user_id": user_id}
-        if timestamp is not None and observation_date is None:
-            observation_date = datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d")
-        if observation_date:
-            payload["observation_date"] = observation_date
+        # Cloud V3 API accepts `timestamp` (unix epoch int), not observation_date
+        if timestamp is not None:
+            payload["timestamp"] = timestamp
+        elif observation_date is not None:
+            # Convert ISO date string to unix epoch for the cloud API
+            from datetime import datetime as dt_cls
+            try:
+                d = dt_cls.strptime(observation_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                payload["timestamp"] = int(d.timestamp())
+            except ValueError:
+                pass
         if custom_instructions:
             payload["custom_instructions"] = custom_instructions
         if metadata:
