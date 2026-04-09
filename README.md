@@ -139,6 +139,86 @@ python -m benchmarks.locomo.run \
   --mem0-host https://api.mem0.ai
 ```
 
+## Results
+
+### Mem0 Platform
+
+Results using the Mem0 managed platform with the v3 memory pipeline.
+
+#### LongMemEval
+
+| Metric | top_200 | top_50 |
+|--------|---------|--------|
+| **Overall** | **93.4%** (467/500) | **90.4%** (452/500) |
+| knowledge-update | 96.2% (75/78) | 96.2% (75/78) |
+| multi-session | 86.5% (115/133) | 82.0% (109/133) |
+| single-session-assistant | 100.0% (56/56) | 92.9% (52/56) |
+| single-session-preference | 96.7% (29/30) | 86.7% (26/30) |
+| single-session-user | 97.1% (68/70) | 95.7% (67/70) |
+| temporal-reasoning | 93.2% (124/133) | 92.5% (123/133) |
+
+#### LoCoMo
+
+| Metric | top_200 | top_50 |
+|--------|---------|--------|
+| **Overall** | **91.6%** (1410/1540) | **82.7%** (1273/1540) |
+
+#### BEAM
+
+| Dataset | top_200 | | top_50 | |
+|---------|---------|---|--------|---|
+| | **Pass Rate** | **Avg Score** | **Pass Rate** | **Avg Score** |
+| **BEAM 1M** (700 questions) | **70.1%** (491/700) | 0.641 | **67.1%** (470/700) | 0.604 |
+| **BEAM 10M** (200 questions) | **50.5%** (101/200) | 0.486 | **45.5%** (91/200) | 0.413 |
+
+<details>
+<summary>BEAM breakdown by memory ability type</summary>
+
+**BEAM 1M (top_200)**
+
+| Ability | Avg Score | Pass Rate |
+|---------|-----------|-----------|
+| preference_following | 0.883 | 68/70 |
+| instruction_following | 0.852 | 62/70 |
+| information_extraction | 0.700 | 53/70 |
+| multi_session_reasoning | 0.652 | 52/70 |
+| knowledge_update | 0.650 | 46/70 |
+| summarization | 0.635 | 48/70 |
+| temporal_reasoning | 0.618 | 47/70 |
+| event_ordering | 0.536 | 42/70 |
+| abstention | 0.525 | 39/70 |
+| contradiction_resolution | 0.357 | 34/70 |
+
+**BEAM 10M (top_200)**
+
+| Ability | Avg Score | Pass Rate |
+|---------|-----------|-----------|
+| preference_following | 0.904 | 19/20 |
+| instruction_following | 0.825 | 18/20 |
+| knowledge_update | 0.750 | 16/20 |
+| information_extraction | 0.562 | 11/20 |
+| summarization | 0.469 | 11/20 |
+| abstention | 0.400 | 8/20 |
+| contradiction_resolution | 0.325 | 5/20 |
+| multi_session_reasoning | 0.261 | 6/20 |
+| event_ordering | 0.202 | 3/20 |
+| temporal_reasoning | 0.163 | 4/20 |
+
+</details>
+
+### OSS with Different Extraction Models
+
+LongMemEval results using the self-hosted Mem0 OSS pipeline with different LLMs for memory extraction. All runs use the same embedder (Qwen 600M via SageMaker), the same Qdrant vector store, and GPT-5 as the answerer and judge.
+
+| Extraction Model | Overall | SS-User | SS-Asst | SS-Pref | Knowledge Update | Temporal Reasoning | Multi-Session |
+|-----------------|---------|---------|---------|---------|------------------|-------------------|---------------|
+| **GPT-5** (OpenAI) | **91.0%** | 95.7% | 92.9% | 93.3% | 91.0% | 94.7% | 83.5% |
+| **GPT-OSS-120B** (Parasail) | **89.8%** | 95.7% | 96.4% | 93.3% | 89.5% | 80.5% | 79.7% |
+| **Llama 4 Maverick** (Parasail) | **88.6%** | 97.1% | 75.0% | 93.3% | 93.6% | 90.2% | 84.2% |
+| **Gemma 4 31B** (Parasail) | **88.6%** | 95.7% | 83.9% | 93.3% | 94.9% | 91.7% | 78.9% |
+
+Full per-question evaluation results are available in [`results/platform/`](results/platform/) and [`results/oss/`](results/oss/).
+
 ## A Note on Benchmark Scores
 
 **Benchmark scores are not absolute numbers.** They depend heavily on:

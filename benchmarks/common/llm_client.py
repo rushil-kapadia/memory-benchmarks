@@ -363,7 +363,7 @@ class LLMClient:
     # Yes/No judge shortcut
     # -------------------------------------------------------------------------
 
-    async def judge_yes_no(self, prompt: str) -> bool:
-        """Run a yes/no judge prompt. Returns True for 'yes'."""
+    async def judge_yes_no(self, prompt: str) -> tuple[bool, str]:
+        """Run a yes/no judge prompt. Returns (correct, raw_response)."""
         raw = await self.generate(system="", user=prompt, temperature=0)
-        return self._parse_yes_no_judgment(raw)
+        return self._parse_yes_no_judgment(raw), raw

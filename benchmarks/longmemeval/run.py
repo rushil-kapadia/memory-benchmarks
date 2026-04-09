@@ -476,6 +476,10 @@ async def ingest_question(
                 "chunk_size": CHUNK_SIZE,
                 "completed_chunks": list(chunks_already_done),
             })
+            pbar.set_description(
+                f"Ingest {question_id}"
+                + (f" [!fail={total_failed}]" if total_failed else "")
+            )
             pbar.update(1)
 
     pbar.close()
@@ -514,6 +518,7 @@ async def process_question_answerer(
     predict_only: bool,
     logger: Any,
     score_debug: bool = False,
+    existing_search_results: list | None = None,
 ) -> dict[str, Any]:
     """Process a question in answerer mode: search + generate answer + judge.
 
@@ -531,13 +536,17 @@ async def process_question_answerer(
     )
 
     # --- Search ---
-    start = time.monotonic()
-    search_results = await mem0.search(
-        question_text, user_id, top_k=top_k, score_debug=score_debug,
-    )
-    search_latency = (time.monotonic() - start) * 1000
-
-    formatted, query_debug = format_search_results(search_results)
+    if existing_search_results is not None:
+        formatted = existing_search_results
+        query_debug = None
+        search_latency = 0.0
+    else:
+        start = time.monotonic()
+        search_results = await mem0.search(
+            question_text, user_id, top_k=top_k, score_debug=score_debug,
+        )
+        search_latency = (time.monotonic() - start) * 1000
+        formatted, query_debug = format_search_results(search_results)
 
     result: dict[str, Any] = {
         "question_id": question_id,
@@ -602,7 +611,7 @@ async def process_question_answerer(
             response=generated_answer,
             question_date=question_date_human,
         )
-        correct = await judge_llm.judge_yes_no(judge_prompt)
+        correct, judge_raw = await judge_llm.judge_yes_no(judge_prompt)
         score = 1.0 if correct else 0.0
         judgment = "PASS" if correct else "FAIL"
 
@@ -610,6 +619,7 @@ async def process_question_answerer(
             "judgment": judgment,
             "score": score,
             "generated_answer": generated_answer,
+            "judge_raw": judge_raw,
             "memories_evaluated": len(sliced),
             "reason": f"Generated answer: {generated_answer[:500]}",
         }
@@ -764,7 +774,7 @@ async def apply_longmemeval_answerer_judge_to_saved_result(
             response=generated_answer,
             question_date=question_date_human,
         )
-        correct = await judge_llm.judge_yes_no(judge_prompt)
+        correct, judge_raw = await judge_llm.judge_yes_no(judge_prompt)
         score = 1.0 if correct else 0.0
         judgment = "PASS" if correct else "FAIL"
 
@@ -772,6 +782,7 @@ async def apply_longmemeval_answerer_judge_to_saved_result(
             "judgment": judgment,
             "score": score,
             "generated_answer": generated_answer,
+            "judge_raw": judge_raw,
             "memories_evaluated": len(sliced),
             "reason": f"Generated answer: {generated_answer[:500]}",
         }
@@ -978,8 +989,8 @@ def parse_args() -> argparse.Namespace:
         help="With --evaluate-only: re-run judge even if cutoff_results exist",
     )
     parser.add_argument(
-        "--resume", action="store_true",
-        help="Resume from checkpoint",
+        "--resume", action="store_true", default=True,
+        help="Resume from checkpoint (default: True)",
     )
     parser.add_argument(
         "--debug", action="store_true",
@@ -1252,6 +1263,12 @@ async def async_main() -> None:
             progress = {"done": 0, "total": len(questions_to_process)}
             pbar = tqdm(total=progress["total"], desc="Questions", leave=True)
 
+            # Build lookup of predict-only results (have search data but no cutoff_results)
+            predict_only_results = {
+                e["question_id"]: e for e in all_evaluations
+                if "retrieval" in e and "cutoff_results" not in e
+            }
+
             async def process_single_question(question: dict):
                 async with question_semaphore:
                     if shutdown.requested:
@@ -1265,23 +1282,32 @@ async def async_main() -> None:
                             pbar.update(1)
                             return
 
-                    # --- Ingest ---
-                    success, user_id, pairs = await ingest_question(
-                        question=question,
-                        mem0=mem0,
-                        logger=logger,
-                        run_id=run_id,
-                        output_dir=output_dir,
-                        shutdown=shutdown,
-                        debug=args.debug,
-                    )
-                    if not success:
-                        logger.error(
-                            "Ingestion failed for question %s", question_id,
+                    # Check if we have predict-only results (search data already exists)
+                    existing_predict = predict_only_results.get(question_id)
+                    if existing_predict and existing_predict.get("retrieval"):
+                        # Skip ingest+search, use existing search results
+                        user_id = existing_predict.get("user_id", f"longmemeval_{question_id}_{run_id}")
+                        user_profile = None
+                    else:
+                        # --- Ingest ---
+                        success, user_id, pairs = await ingest_question(
+                            question=question,
+                            mem0=mem0,
+                            logger=logger,
+                            run_id=run_id,
+                            output_dir=output_dir,
+                            shutdown=shutdown,
+                            debug=args.debug,
                         )
+                        if not success:
+                            logger.error(
+                                "Ingestion failed for question %s", question_id,
+                            )
 
-                    if shutdown.requested:
-                        return
+                        if shutdown.requested:
+                            return
+
+                        existing_predict = None  # will search fresh below
 
                     # Fetch user profile if requested
                     user_profile = None
@@ -1303,6 +1329,11 @@ async def async_main() -> None:
                             score_debug=args.score_debug,
                         )
                     else:
+                        # Use existing search results from predict-only run if available
+                        existing_search = None
+                        if existing_predict and existing_predict.get("retrieval"):
+                            existing_search = existing_predict["retrieval"].get("search_results", [])
+
                         result = await process_question_answerer(
                             question=question,
                             user_id=user_id,
@@ -1315,6 +1346,7 @@ async def async_main() -> None:
                             predict_only=args.predict_only,
                             logger=logger,
                             score_debug=args.score_debug,
+                            existing_search_results=existing_search,
                         )
 
                     # Save per-question result
@@ -1331,9 +1363,15 @@ async def async_main() -> None:
 
     # --- Metrics ---
     if not args.predict_only and all_evaluations:
-        has_cutoffs = any("cutoff_results" in e for e in all_evaluations)
+        # Deduplicate by question_id, keeping the latest (last) entry
+        seen = {}
+        for e in all_evaluations:
+            seen[e.get("question_id")] = e
+        deduped = list(seen.values())
+
+        has_cutoffs = any("cutoff_results" in e for e in deduped)
         if has_cutoffs:
-            metrics = compute_longmemeval_metrics(all_evaluations, cutoffs)
+            metrics = compute_longmemeval_metrics(deduped, cutoffs)
             display_results(metrics, cutoffs)
 
             # Save unified result

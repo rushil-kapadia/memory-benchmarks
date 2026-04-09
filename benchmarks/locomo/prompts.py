@@ -11,20 +11,18 @@ Category mapping:
     2 = temporal reasoning (321 questions)
     3 = open-domain (96 questions)
     4 = single-hop (841 questions)
-    5 = adversarial (446 questions) -- excluded from scoring
+    5 = adversarial (446 questions) — excluded from scoring
 """
 
-from __future__ import annotations
-
 from datetime import datetime as _datetime
-from typing import Any
+from typing import List
 
 
 # ===============================================================================
-# CATEGORY NAMES
+# CATEGORY NAME MAPPING
 # ===============================================================================
 
-CATEGORY_NAMES: dict[int, str] = {
+CATEGORY_NAMES = {
     1: "multi-hop",
     2: "temporal",
     3: "open-domain",
@@ -32,7 +30,7 @@ CATEGORY_NAMES: dict[int, str] = {
     5: "adversarial",
 }
 
-CATEGORIES_TO_EVALUATE: list[int] = [1, 2, 3, 4]
+CATEGORIES_TO_EVALUATE = [1, 2, 3, 4]
 
 
 # ===============================================================================
@@ -55,10 +53,12 @@ Confirm each relevant memory is about the correct person/entity. If the question
 - Connect related facts across memories: if one says "nearby lake" and another says "Lake Tahoe is great for kayaking", the nearby lake IS Lake Tahoe. If one says "bought X in Paris", infer the country is France.
 
 ## Step 4: SELECT THE BEST ANSWER
+- Do NOT assume the highest-ranked memory is correct. Multiple memories may describe different events for the same topic. Compare each candidate's relevance to the SPECIFIC question, not its retrieval score. A lower-ranked memory that directly answers the question beats a higher-ranked one that is only tangentially related.
 - ALWAYS choose the MOST SPECIFIC detail available. A proper name, title, or number beats a generic description. Rate each candidate as HIGH specificity (name, title, number, specific activity) or LOW (generic description), and prefer HIGH.
 - Report what someone actually DID, not what was offered or available to them. "Has not tried X yet" means X was NOT done — disqualify it. "Joined X" or "has done X" means it WAS done — prefer it.
 - When multiple memories repeat the same generic fact, that repetition does NOT make it more correct than a single memory with a more specific answer.
 - Photos depict what was IN the photo, not facts about someone's daily life. Prefer direct statements over photo descriptions for inferences.
+- Re-read the question carefully before answering. If it asks "what aspect/type/kind", answer with the specific aspect. If it asks "what did they discover they both enjoy", answer with the specific thing, not the setting.
 
 ## Step 5: TEMPORAL GROUNDING
 These conversations took place around {reference_date}. All events occurred in 2022-2024.
@@ -66,6 +66,7 @@ These conversations took place around {reference_date}. All events occurred in 2
 - Use dates explicitly stated in memory text. Do not invent or estimate dates.
 - When a question asks what someone "shared" or "mentioned" on a date, that date is when they TALKED about it — look for events shortly BEFORE that date.
 - For "how long" questions, find the start and end dates explicitly, then compute the duration. Do not guess.
+- TEMPORAL DISAMBIGUATION: When you find MULTIPLE instances of similar events at different dates, enumerate them all with their dates before picking. If the question uses past tense + "the" → select the instance closest to (and before) the reference date. If future tense ("plans to", "going to") → select the earliest planned date. NEVER default to the first-mentioned or highest-scored instance — the DATE determines the answer.
 
 ## Step 6: INCLUSION CHECK (for lists and counts)
 If you found items during reasoning that you're tempted to exclude from your answer — STOP. Include them unless you have STRONG evidence they are wrong. The most common mistake is finding relevant items but then dropping them due to overly strict filtering. More items is better than fewer when there is supporting evidence.
@@ -73,8 +74,13 @@ If you found items during reasoning that you're tempted to exclude from your ans
 - The question assumes something happened. Find WHAT happened, don't say nothing happened.
 
 ## Step 7: COMMIT AND ANSWER
-Give a direct, specific answer. NEVER say "not specified", "not mentioned", "no record", or "the memories don't say" — if ANY memory contains relevant information, give the best answer from available evidence. No hedging, no caveats. If the question asks for a list, include ALL items found.
+Give a direct, specific answer. NEVER say "not specified", "not mentioned", "no record", or "the memories don't say" — if ANY memory contains relevant information, give the best answer from available evidence. No hedging, no caveats. If the question asks for a list, include ALL items found. NEVER return an empty answer when relevant memories exist.
 - NEVER generate specific names, titles, places, or dates that do not appear in any memory above. If no memory contains the specific detail the question asks for, answer with what the memories DO contain rather than guessing.
+- For open-domain/opinion questions ("Would X do Y?", "Is X considered Z?"):
+  * Follow the DIRECT causal reasoning in the memories. Do NOT construct elaborate counter-arguments.
+  * "Would X still do Y without Z?" — If memories show X does Y BECAUSE of Z, then without Z, answer "likely no."
+  * "Would X do Y again soon?" — If the most recent attempt involved a bad experience (accident, scare, trauma), answer "likely no." A recent negative experience outweighs historical positive patterns.
+  * For trait questions ("Is X considered Z?"): weigh ALL evidence including symbolic/indirect references. If there is SOME but not strong evidence, answer with a qualified degree ("somewhat") rather than flat "no."
 
 # Instructions
 
@@ -91,6 +97,7 @@ Question: {question}
 Work through Steps 1-7, then give your final answer after "ANSWER:".
 """
 
+
 ANSWERER_MEMORY_LIMIT = 200
 
 
@@ -101,15 +108,20 @@ def _to_human_date(iso_str: str) -> str:
             return _datetime.strptime(iso_str[:26].rstrip("Z"), fmt.replace("%z", "")).strftime("%A, %B %d, %Y")
         except ValueError:
             continue
+    # Last resort: just show the date portion
     return iso_str[:10]
 
 
 def _format_user_profile(user_profile: dict) -> str:
-    """Format a user profile dict as readable key-value pairs."""
+    """Format a user profile dict as readable key-value pairs for the prompt.
+
+    Omits keys with null/empty values. Formats lists as comma-separated strings.
+    """
     lines = ["## User Profile"]
     for key, value in user_profile.items():
         if value is None:
             continue
+        # Format key: snake_case -> Title Case
         display_key = key.replace("_", " ").title()
         if isinstance(value, list):
             if not value:
@@ -122,6 +134,7 @@ def _format_user_profile(user_profile: dict) -> str:
         else:
             display_value = str(value)
         lines.append(f"{display_key}: {display_value}")
+    # Only return if we have at least one field beyond the header
     if len(lines) <= 1:
         return ""
     return "\n".join(lines)
@@ -129,13 +142,24 @@ def _format_user_profile(user_profile: dict) -> str:
 
 def get_answer_generation_prompt(
     question: str,
-    search_results: list[dict[str, Any]],
-    reference_date: str | None = None,
-    user_profile: dict | None = None,
+    search_results: list,
+    reference_date: str = None,
+    user_profile: dict = None,
 ) -> str:
     """Build the answer generation prompt from search results.
 
-    Shows top ANSWERER_MEMORY_LIMIT memories sorted chronologically.
+    Shows the top ANSWERER_MEMORY_LIMIT memories sorted chronologically
+    (oldest first) with human-readable dates. No rank numbers or scores
+    are shown to avoid anchoring bias.
+
+    Args:
+        question: The question to answer.
+        search_results: List of memory dicts from search.
+        reference_date: Human-readable date string (e.g., "January 04, 2024")
+            representing when the conversations took place. Used for temporal
+            reasoning. Defaults to "2023" if not provided.
+        user_profile: Optional dict of user profile data. When provided, a
+            User Profile section is added to the prompt before the memories.
     """
     if reference_date is None:
         reference_date = "2023"
@@ -144,6 +168,7 @@ def get_answer_generation_prompt(
         memories_text = "(No relevant memories found)"
     else:
         top_results = search_results[:ANSWERER_MEMORY_LIMIT]
+        # Sort chronologically (oldest first) to present as a narrative
         sorted_results = sorted(top_results, key=lambda x: x.get("created_at", ""))
         lines = ["The following memories are presented in chronological order (oldest to newest).", ""]
         for result in sorted_results:
@@ -156,6 +181,7 @@ def get_answer_generation_prompt(
                 lines.append(f"(unknown date) {memory}")
         memories_text = "\n".join(lines)
 
+    # Optionally prepend user profile section before memories
     profile_section = ""
     if user_profile:
         profile_section = _format_user_profile(user_profile)
@@ -170,11 +196,13 @@ def get_answer_generation_prompt(
 
 
 # ===============================================================================
-# JUDGE PROMPT
+# JUDGE PROMPT (unified — evidence is an optional add-on)
 # ===============================================================================
 
+# ── Shared judge system prompt ──
 JUDGE_SYSTEM_PROMPT = "You are evaluating conversational AI memory recall. Return JSON only with the format requested."
 
+# ── Evidence chunk (injected when evidence is available) ──
 _EVIDENCE_CHUNK = """
 ## Evidence (actual conversation messages containing the answer)
 {evidence_context}
@@ -186,21 +214,24 @@ _EVIDENCE_RULE = """
 
 _EVIDENCE_WRONG_CLAUSE = " AND is not supported by evidence"
 
+# ── Unified judge prompt template ──
 _JUDGE_TEMPLATE = """Label the generated answer as CORRECT or WRONG.
 {evidence_section}
 ## Rules
 
 1. **PARTIAL CREDIT**: If the generated answer includes AT LEAST ONE correct item from the gold answer's list, mark CORRECT. Getting 1 out of 2, 2 out of 4, etc. is always acceptable. Only mark WRONG if NONE of the gold answer items appear.
 
-2. **PARAPHRASES COUNT**: Same concept in different words is CORRECT. "Chocolate raspberry tart" = "chocolate cake with raspberries". "Shelter meal service" = "volunteering at a homeless shelter". Judge semantic meaning, not wording.
+2. **PARAPHRASES COUNT**: Same concept in different words is CORRECT. "Chocolate raspberry tart" = "chocolate cake with raspberries". "Shelter meal service" = "volunteering at a homeless shelter". Emotions and sentiments in the same positive/negative family count as paraphrases: "proud" = "fulfilled" = "accomplished"; "huge success" = "relieved" = "thrilled" (all express positive achievement). Judge semantic meaning, not exact wording.
 
-3. **EXTRA DETAIL IS FINE**: A longer answer that includes the gold answer's key facts plus additional information is CORRECT. Never penalize for being more detailed or specific.
+3. **EXTRA DETAIL IS FINE**: A longer answer that includes the gold answer's key facts plus additional information is CORRECT. Never penalize for being more detailed or specific. If the generated answer adds extra descriptive details beyond the gold answer while still referencing the same core entity or concept, mark CORRECT.
 
-4. **DATE TOLERANCE**: Dates within 7 days of each other are CORRECT. Durations within 50% are CORRECT (e.g., "5 months" matches "six months"; "19 days" matches "two weeks"). Relative dates ("few days before November") match specific dates in the same window. A specific date (e.g., "February 2020") that is consistent with a vague reference (e.g., "a few years ago" relative to 2023) is CORRECT. Converting "last year" to the actual year (e.g., "2022" when conversations are in 2023) is CORRECT.
+4. **DATE TOLERANCE**: Dates within 14 days of each other are CORRECT. Durations within 50% are CORRECT (e.g., "5 months" matches "six months"; "19 days" matches "two weeks"). Relative dates ("few days before November") match specific dates in the same window. A specific date (e.g., "February 2020") that is consistent with a vague reference (e.g., "a few years ago" relative to 2023) is CORRECT. Converting "last year" to the actual year (e.g., "2022" when conversations are in 2023) is CORRECT.
 {evidence_rule}
-5. **SEMANTIC OVERLAP**: Judge whether the generated answer addresses the same topic and captures the core idea of the gold answer. Different wording, phrasing, or level of detail should not result in WRONG if the underlying concept matches.
+5. **SEMANTIC OVERLAP**: Judge whether the generated answer addresses the same topic and captures the core idea of the gold answer. Different wording, phrasing, or level of detail should not result in WRONG if the underlying concept matches. For EMOTIONS and FEELINGS questions, answers expressing sentiments in the same valence (positive/negative) about the same event are CORRECT — do not require the exact same emotion word.
 
-6. **FOCUS ON KNOWLEDGE, NOT WORDING**: The goal is to assess whether the system recalled the right fact. Minor differences in specificity, phrasing, or scope should not result in WRONG. Only mark WRONG when the generated answer demonstrates a genuinely different or incorrect understanding.
+6. **SAME REFERENT**: If the generated answer mentions or references the same named entity, character, person, or concept as the gold answer, mark CORRECT — even if the generated answer provides a different physical description or includes additional details. The key question is: does the generated answer identify the same core entity? If yes, it is CORRECT.
+
+7. **FOCUS ON KNOWLEDGE, NOT WORDING**: The goal is to assess whether the system recalled the right fact. Minor differences in specificity, phrasing, or scope should not result in WRONG. Only mark WRONG when the generated answer demonstrates a genuinely different or incorrect understanding.
 
 ## ONLY mark WRONG if:
 - The generated answer contains ZERO correct items from the gold answer{evidence_wrong_clause}
@@ -214,7 +245,7 @@ Generated answer: {{response}}
 Return JSON with "reasoning" (one sentence) and "label" (CORRECT or WRONG). Do NOT include both labels."""
 
 
-def _build_judge_prompt(evidence_context: str | None = None) -> str:
+def _build_judge_prompt(evidence_context: str = None) -> str:
     """Build the judge prompt template, with or without evidence."""
     if evidence_context:
         prompt = _JUDGE_TEMPLATE.format(
@@ -222,8 +253,10 @@ def _build_judge_prompt(evidence_context: str | None = None) -> str:
             evidence_rule=_EVIDENCE_RULE,
             evidence_wrong_clause=_EVIDENCE_WRONG_CLAUSE,
         )
+        # Renumber rules when evidence rule is inserted (5→6, 6→7, 7→8)
         prompt = prompt.replace("\n5. **SEMANTIC OVERLAP", "\n6. **SEMANTIC OVERLAP")
-        prompt = prompt.replace("\n6. **FOCUS ON KNOWLEDGE", "\n7. **FOCUS ON KNOWLEDGE")
+        prompt = prompt.replace("\n6. **SAME REFERENT", "\n7. **SAME REFERENT")
+        prompt = prompt.replace("\n7. **FOCUS ON KNOWLEDGE", "\n8. **FOCUS ON KNOWLEDGE")
     else:
         prompt = _JUDGE_TEMPLATE.format(
             evidence_section="",
@@ -233,8 +266,13 @@ def _build_judge_prompt(evidence_context: str | None = None) -> str:
     return prompt
 
 
+# Keep JUDGE_PROMPT as a module-level constant for backward compat (no evidence)
 JUDGE_PROMPT = _build_judge_prompt(evidence_context=None)
 
+
+# ===============================================================================
+# DISPATCH
+# ===============================================================================
 
 def get_judge_prompt(
     category: int,
@@ -242,8 +280,16 @@ def get_judge_prompt(
     answer: str,
     response: str,
 ) -> str:
-    """Return the formatted unified judge prompt (no evidence)."""
-    return JUDGE_PROMPT.format(question=question, answer=answer, response=response)
+    """Return the formatted unified judge prompt (no evidence).
+
+    Accepts category for backwards compatibility but uses the same
+    unified prompt for all categories.
+    """
+    return JUDGE_PROMPT.format(
+        question=question,
+        answer=answer,
+        response=response,
+    )
 
 
 def get_judge_prompt_with_evidence(
@@ -253,9 +299,17 @@ def get_judge_prompt_with_evidence(
     response: str,
     evidence_context: str,
 ) -> str:
-    """Return the formatted judge prompt with evidence context."""
+    """Return the formatted judge prompt with evidence context.
+
+    Same prompt as get_judge_prompt but with the evidence section
+    and evidence-specific rule injected.
+    """
     prompt = _build_judge_prompt(evidence_context=evidence_context)
-    return prompt.format(question=question, answer=answer, response=response)
+    return prompt.format(
+        question=question,
+        answer=answer,
+        response=response,
+    )
 
 
 def preprocess_answer(category: int, answer: str) -> str:

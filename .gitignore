@@ -13,6 +13,10 @@ evals.db-shm
 
 # Outputs
 results/
+!results/platform/
+!results/platform/**
+!results/oss/
+!results/oss/**
 datasets/
 logs/
 evaluation_results/
@@ -33,3 +37,4 @@ evaluation_results/
 tsconfig.tsbuildinfo
 next-env.d.ts
 mem0-config.yaml
+mem0-config-*.yaml
